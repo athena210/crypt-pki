@@ -1,0 +1,16 @@
+# $SUBSTKEYNAME
+
+verb            1
+client
+dev-type        tun
+dev             tun
+remote          $PREPARE_TEMPLATE_SERVER2 $PREPARE_TEMPLATE_PORT2 tcp4
+remote-cert-tls server
+
+<auth-user-pass>
+$SUBSTKEYNAME,$PREPARE_TEMPLATE_ROLES
+$PREPARE_TEMPLATE_PASSWORD
+</auth-user-pass>
+
+$SUBSTCERTAPI
+$SUBSTCA

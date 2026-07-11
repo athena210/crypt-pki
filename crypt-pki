@@ -1,0 +1,1289 @@
+#!/bin/bash
+
+# trunk-ignore-all(shellcheck/SC2001)
+# trunk-ignore-all(shellcheck/SC2250)
+# trunk-ignore-all(shellcheck/SC2292)
+# trunk-ignore-all(shellcheck/SC2312)
+
+helpexit() {
+    local me
+    me=$(basename "$0")
+
+    BOLD=
+    GREEN=
+    RESET=
+    if [ -t 1 ]; then
+        BOLD=$(printf '\033[1m')
+        GREEN=$(printf '\033[32m')
+        RESET=$(printf '\033[0m')
+    fi
+
+    cat <<-'HELP' |
+@GREEN@Encrypted PKI manager@RESET@.
+@BOLD@Must be started with root privileges.@RESET@
+
+@BOLD@@ME@ --help@RESET@
+  Print help and exit.
+  Exit code is 1.
+
+@GREEN@OPERATIONS:@RESET@
+  @ME@ is able to create encrypted container, mount and unmount it, mount-execute-unmount operations in one step.
+  Actual PKI is based on easy-rsa inside the container. It goes interactively while no passwords are given in
+  environment variables (check VARIABLES section). @ME@ is just a wrap for easy-rsa, so it takes same environment
+  variables and uses filenames without extension (internalname) to point to some certificate.
+  First parameter always must be a cryptfile.
+  Always tries to close the container at first if it was already opened. Returns 1 if failed.
+
+@BOLD@@ME@ cryptfile --init [--size size] [--url "http://example.com/crl"]@RESET@
+  Create a new container in the cryptfile. File can not exist.
+  Then copy /usr/share/easy-rsa inside, tune vars and configs.
+  Then runs "easyrsa init-pki" inside the container.
+  Size in MiB for an ext4 filesystem in the container. Minimum 8 MiB (3.5 data + journal).
+  Default size is 12 MiB (7.3 data + journal). Actual container is always 16 MiB bigger than size.
+  Url is a http (not https) url to crl distribution point. Web server should answer with application/pkix-crl MIME.
+  If succeed exit code is 0 and stdout is a line with base64 container key.
+  Now it is a good time to modify configs if needed before any keys manipulations.
+
+@BOLD@@ME@ cryptfile --open@RESET@
+  Open container from cryptfile and mount it in temp directory with permission 700.
+  If succeed exit code is 0 and stdout is a name of the mountpoint.
+  Dont forget to close it!
+
+@BOLD@@ME@ cryptfile --close@RESET@
+  Tries to close container if it is already opened.
+  If succeed exit code is 0.
+
+@BOLD@@ME@ cryptfile --exec --cmd "cmdline"@RESET@
+  Open container from cryptfile and mount it in temp directory with permission 700. Exits if failed.
+  Then runs cmdline string with eval. You can use variable SECD in cmdline as the mountpoint. Current dir for
+  the cmdline is the mountpoint.
+  Then closes container.
+  Exit code is 0 if all steps succeded and cmdline exit code is 0.
+
+@BOLD@@ME@ cryptfile --newtc2 --internalname internalname [--servertc2 serverinternalname]@RESET@
+  Creating a new tls-crypt-v2 key.
+  If servertc2 is not specified then create server key, otherwise create client key.
+  Internalname is a part of the filename: [$serverinternalname___]$internalname.tc2.
+  Key must not exist.
+  Exit code is 0 if generated successfully.
+
+@BOLD@@ME@ cryptfile --rmtc2 --internalname internalname [--servertc2 serverinternalname]@RESET@
+  Remove tls-crypt-v2 key.
+  Internalname is a part of the filename: [$serverinternalname___]$internalname.tc2.
+  Exit code is 0 if generated successfully.
+
+@BOLD@@ME@ cryptfile --newreq [--cn CN] --internalname internalname [--nopass]@RESET@
+  Creating a new cert request:
+  If CN is not specified then cn=internalname.
+  Internalname is a filename of key/request/cert without extension.
+  Requests with the same internalname which dont have key or cert will be overwritten.
+  If nopass is missed asks for a key password or takes it from EASYRSA_PASSOUT variable.
+  Exit code is 0 if filename is available and request is generated successfully.
+
+@BOLD@@ME@ cryptfile --loadreq --file filename [--internalname internalname]@RESET@
+  Load external cert request inside container.
+  Checks if filename have same available internalname and protects existing keys from overwriting.
+  Requests which dont have key or cert may be overwritten.
+  Exit code is 0 if same internalname is available and request is loaded successfully.
+
+@BOLD@@ME@ cryptfile --signserver --internalname internalname [--userid userid]@RESET@
+  Sign cert request inside container.
+  If userid is not specified then userid=internalname.
+  Adds dns and rfc822Name(userid) in subject-alt-name. Correct DNS is important if you run ipsec server.
+  rfc822Name is being used as a some text tag.
+  EASYRSA_PASSIN variable is a password for ca key if being used in batch mode.
+  Exit code is 0 if signed successfully.
+
+@BOLD@@ME@ cryptfile --signclient --internalname internalname [--userid userid]@RESET@
+  Sign cert request inside container.
+  If userid is not specified then userid=internalname.
+  Adds dns and rfc822Name(userid) in subject-alt-name. DNS goes the same as CN for strongswan.
+  rfc822Name(userid) might be used as some user tag.
+  EASYRSA_PASSIN variable is a password for ca key if being used in batch mode.
+  Exit code is 0 if signed successfully.
+
+@BOLD@@ME@ cryptfile --info [ --internalname internalname | --serial serial ]@RESET@
+  Print info about certificate by internalname or serial.
+  Serial is a case-insensitive hex serial without any octet separators (0466a8ce8A193802df863E47F357157a)
+  1st line in stdout will be one of 3:
+    1) ACTIVE
+      Means certificate is found and it is active. Exit code 0.
+    2) REVOKED
+      Means certificate is found and it is revoked. Exit code 0.
+    3) NOTFOUND
+      Means certificate is not found. Exit code 0.
+  Then it goes cert info starting from the 2nd line.
+
+@BOLD@@ME@ cryptfile --revoke [ --internalname internalname | --serial serial ] --file crlfile@RESET@
+  Revoke certificate by its internalname or serial and rebuilds CRL.
+  Serial is a case-insensitive hex serial without any octet separators (0466a8ce8A193802df863E47F357157a)
+  EASYRSA_PASSIN variable is a password for ca key if being used in batch mode.
+  Crlfile is output file with a new CRL.
+  Exit code is 0 if all steps succeded, but tries to rebuild crl despite of revocation result.
+
+@BOLD@@ME@ cryptfile --crl [--file crlfile]@RESET@
+  Rebuilds CRL.
+  EASYRSA_PASSIN variable is a password for ca key if being used in batch mode.
+  Crlfile is a destination to copy the new CRL. If not specified then CRL stays inside container.
+  Exit code is 0 if succeded.
+
+@BOLD@@ME@ cryptfile --loadtemplate --file template@RESET@
+  Load template of openvpn config to easily export and distribute configs and keys.
+  Check for examples in /usr/share/@ME@/templates
+  Exit code is 0 if succeded.
+
+@BOLD@@ME@ cryptfile --export-config --template tplname --internalname internalname --file configfile [--servertc2 serverinternalname]@RESET@
+  Export fulfilled template with certificate, ca, etc.
+  Check for examples in /usr/share/@ME@/templates
+  Exit code is 0 if succeded.
+
+@BOLD@@ME@ cryptfile --export-chain --internalname internalname --file chainfile@RESET@
+  Export certificate specified by internalname with key and ca in PKCS #12 format.
+  Client key file must exist in PKI.
+  EASYRSA_PASSOUT variable is a password for the chainfile container if being used in batch mode.
+  Exit code is 0 if succeded.
+
+@BOLD@@ME@ cryptfile --export-response --internalname internalname --file chainfile@RESET@
+  Export certificate specified by internalname and ca in PKCS #7 format.
+  Client key file must exist on client side. Used as response to client cert request.
+  Exit code is 0 if succeded.
+
+@BOLD@@ME@ cryptfile --export-zip --internalname internalname --file archive [--servertc2 serverinternalname]@RESET@
+  Export specified cert, key, ca and ta in zip archive.
+  Exit code is 0 if succeded.
+
+@GREEN@VARIABLES@RESET@:
+  @BOLD@EASYRSA_PASSIN@RESET@ and @BOLD@EASYRSA_PASSOUT@RESET@ are used by easyrsa being started inside the PKI container.
+    See the openssl-passphrase-options(1) manual page for format.
+  @BOLD@CTKEY@RESET@ is a key for the container.
+  @BOLD@SECD@RESET@ is a variable to be used inside --exec --cmd. Contains a path to mounted PKI container.
+
+
+@GREEN@EXAMPLES@RESET@:
+  # Create a new container
+  @BOLD@ctkey=$(@ME@ ./cryptfile --init --url "http://example.com/crl") && [ -n "$ctkey" ] && echo "$ctkey" > ./ctkey@RESET@
+
+  # Generate a CA
+  @BOLD@echo "Secret_CA_Password" > "./capwd" # For batch mode@RESET@
+  @BOLD@EASYRSA_PASSIN="pass:$(cat ./capwd)" EASYRSA_PASSOUT="$EASYRSA_PASSIN" CTKEY="$(cat ./ctkey)" @ME@ ./cryptfile --exec --cmd "easy-rsa/easyrsa --req-cn=\"exampleCA\" build-ca"@RESET@
+  # or just dont use variables for interactive mode
+  @BOLD@@ME@ ./cryptfile --exec --cmd "easy-rsa/easyrsa --req-cn=\"exampleCA\" build-ca"@RESET@
+
+  # Generate a new CRL
+  @BOLD@EASYRSA_PASSIN="pass:$(cat ./capwd)" CTKEY="$(cat ./ctkey)" @ME@ ./cryptfile --crl --file /var/www/crlfile.crl@RESET@
+
+  # Generate cert request for a server with unencrypted private key
+  @BOLD@CTKEY="$(cat ./ctkey)" @ME@ ./cryptfile --newreq --internalname vpn.example.com --nopass@RESET@
+
+  # Generate more cert requests
+  @BOLD@EASYRSA_PASSOUT="pass:1234" CTKEY="$(cat ./ctkey)" @ME@ ./cryptfile --newreq --internalname smith2 --cn "user2"@RESET@
+
+  # Load clients request
+  @BOLD@CTKEY="$(cat ./ctkey)" @ME@ ./cryptfile --loadreq --file ./client.req --internalname smith3@RESET@
+
+  # Sign requests
+  @BOLD@EASYRSA_PASSIN="pass:$(cat ./capwd)" CTKEY="$(cat ./ctkey)" @ME@ ./cryptfile --signserver --internalname vpn.example.com@RESET@
+  @BOLD@EASYRSA_PASSIN="pass:$(cat ./capwd)" CTKEY="$(cat ./ctkey)" @ME@ ./cryptfile --signclient --internalname smith2 --userid alice_smith@RESET@
+  @BOLD@EASYRSA_PASSIN="pass:$(cat ./capwd)" CTKEY="$(cat ./ctkey)" @ME@ ./cryptfile --signclient --internalname smith3 --userid sandra_smith@RESET@
+
+  # Get info about cert
+  @BOLD@CTKEY="$(cat ./ctkey)" @ME@ ./cryptfile --info --internalname smith3@RESET@
+
+  # Revoke cert
+  @BOLD@EASYRSA_PASSIN="pass:$(cat ./capwd)" CTKEY="$(cat ./ctkey)" @ME@ ./cryptfile --revoke --internalname smith2 --file /var/www/crlfile.crl@RESET@
+
+  # Config templates
+  @BOLD@CTKEY="$(cat ./ctkey)" @ME@ ./cryptfile --loadtemplate --file /usr/share/@ME@/templates/win-api@RESET@
+  @BOLD@CTKEY="$(cat ./ctkey)" @ME@ ./cryptfile --export-config --template win-api --internalname smith --file ./config-win.ovpn@RESET@
+
+  # Export certificates
+  @BOLD@EASYRSA_PASSOUT="pass:12345" CTKEY="$(cat ./ctkey)" @ME@ ./cryptfile --export-chain --internalname smith --file ./smith.p12@RESET@
+  @BOLD@CTKEY="$(cat ./ctkey)" @ME@ ./cryptfile --export-response --internalname smith3 --file ./smith3.p7b@RESET@
+  @BOLD@CTKEY="$(cat ./ctkey)" @ME@ ./cryptfile --export-zip --internalname vpn.example.com --file ./server.zip@RESET@
+
+  # Check the container for a free space
+  @BOLD@CTKEY="$(cat ./ctkey)" @ME@ ./cryptfile --exec --cmd "df -h \$SECD"@RESET@
+
+  # Print easy-rsa\vars piped and filtered
+  @BOLD@CTKEY="$(cat ./ctkey)" @ME@ ./cryptfile --exec --cmd "cat easy-rsa/vars|sed -n '/^[\t ]*#/d;/^[\t ]*$/d;p'"@RESET@
+                                                                                 
+  # Open the container for a manual maintance
+  @BOLD@CTKEY="$(cat ./ctkey)" @ME@ ./cryptfile --open@RESET@
+
+  # Close the container
+  @BOLD@@ME@ ./cryptfile --close@RESET@
+
+HELP
+    sed \
+      -e "s|@ME@|$me|g" \
+      -e "s|@BOLD@|$BOLD|g" \
+      -e "s|@GREEN@|$GREEN|g" \
+      -e "s|@RESET@|$RESET|g"
+    exit 1
+}
+
+
+errorinfo() {
+    echo "$1" >&2
+}
+
+
+open_container() {
+    local pki_container="$1"
+    local CTKEY_txt="$2"
+    local crypto_dir
+    local container_name
+
+    if [ -z "$pki_container" ]; then
+        errorinfo "(${FUNCNAME[0]}) Set filename of the container"
+        return 1
+    fi
+
+    pki_container="$(realpath -ms -- "$pki_container")"
+    if [ ! -f "$pki_container" ]; then
+        errorinfo "(${FUNCNAME[0]}) The container does not exists: $pki_container"
+        return 1
+    fi
+
+    if ! container_name=$(openssl rand -hex 8); then
+        rm -f "$pki_container"
+        errorinfo "(${FUNCNAME[0]}) Openssl rand error"
+        return 1
+    fi
+
+    CTKEY_txt="$CTKEY"
+    [ -n "$CTKEY_txt" ] || read -rsp "Key (base64) for the container: " CTKEY_txt
+    if [ -z "$CTKEY_txt" ]; then
+        errorinfo "(${FUNCNAME[0]}) Container key is empty"
+        return 1
+    fi
+
+    # if ! echo "$CTKEY_txt" | base64 -d | cryptsetup open --type luks --key-file - "$pki_container" "$container_name" ; then
+    if ! echo "$CTKEY_txt" | base64 -d | cryptsetup open --type luks2 --key-file - "$pki_container" "$container_name" ; then
+        errorinfo "(${FUNCNAME[0]}) Cannot open container: $pki_container"
+        return 1
+    fi
+
+    if \
+        ! crypto_dir=$(mktemp -d /tmp/cptXXXXXX) || \
+        ! chmod 700 "$crypto_dir"
+    then
+        cryptsetup close "$container_name"
+        errorinfo "(${FUNCNAME[0]}) Cannot deal with temp mountpoint: $crypto_dir"
+        return 1
+    fi
+
+    # if ! mount -o sync "/dev/mapper/$container_name" "$crypto_dir"; then
+    if ! mount "/dev/mapper/$container_name" "$crypto_dir"; then
+        rm -rf "$crypto_dir"
+        cryptsetup close "$container_name"
+        errorinfo "(${FUNCNAME[0]}) Cannot mount container $pki_container to $crypto_dir"
+        return 1
+    fi
+
+    if ! chmod 700 "$crypto_dir" ; then
+        umount -l "$crypto_dir"
+        rm -rf "$crypto_dir"
+        cryptsetup close "$container_name"
+        errorinfo "(${FUNCNAME[0]}) Cannot set permissions after mount."
+        return 1
+    fi
+
+    echo "$crypto_dir"
+    return 0
+}
+
+
+close_container() {
+    local pki_container="$1"
+    local loopname
+    local container_name
+    local crypto_dir
+    local ret=0
+
+    if [ -z "$pki_container" ]; then
+        errorinfo "(${FUNCNAME[0]}) Set a filename of container"
+        return 1
+    fi
+
+    pki_container="$(realpath -ms -- "$pki_container")"
+    if [ ! -f "$pki_container" ]; then
+        errorinfo "(${FUNCNAME[0]}) Container does not exists: $pki_container"
+        return 1
+    fi
+
+    # if same container is being opened multiple times
+    while read -r loopname; do
+        loopname=$(basename "$loopname")
+
+        # if multiple devices associated with this loop
+        while read -r container_name; do
+            sync "/dev/mapper/$container_name" || sleep 5
+
+            # if mounted multiple times
+            while read -r crypto_dir; do
+                if [ -n "$crypto_dir" ]; then
+                    umount -l "$crypto_dir"
+                    rm -rf "$crypto_dir"
+                fi
+            done < <(lsblk "/dev/mapper/$container_name" -no mountpoint)
+
+            if ! cryptsetup close "$container_name"; then
+                errorinfo "(${FUNCNAME[0]}) Associated device cannot be closed: /dev/mapper/$container_name"
+                ret=1
+            fi
+        done < <(dmsetup deps -o devname | grep "($loopname)" | cut -d ':' -f1)
+    done < <(losetup -j "$pki_container" | cut -d ':' -f1)
+
+    return "$ret"
+}
+
+
+exec_inside() {
+    local crypto_dir="$1"
+    shift
+    local command="$*"
+
+    # trunk-ignore-begin(shellcheck/SC2016)
+    command='
+        wd=$(pwd);
+        export SECD="$crypto_dir";
+        export EASYRSA_VARS_FILE="$crypto_dir/easy-rsa/vars";
+        cd "$SECD" || return 1;
+        '$command';
+        ret=$?;
+        cd "$wd" || return 1;
+        return "$ret"
+    '
+    # trunk-ignore-end(shellcheck/SC2016)
+    (eval "$command") ; ret=$?
+    return "$ret"
+}
+
+
+getparam() {
+    local param="$1";
+    shift
+    local cryptfile="$1"
+    local ret
+
+    [ -n "$param" ] || return 1
+
+    ret=1
+    case "$param" in
+    "CRYPT")
+        if [ -n "$cryptfile" ] ; then
+            ret=0
+            echo "$cryptfile"
+        fi
+        ;;
+
+    *)
+        while shift && [ "$ret" -eq 1 ] ; do
+            case "$1" in
+            "--init" | \
+            "--open" | \
+            "--close" | \
+            "--exec" | \
+            "--newtc2" | \
+            "--rmtc2" | \
+            "--newreq" | \
+            "--loadreq" | \
+            "--loadtemplate" | \
+            "--signserver" | \
+            "--signclient" | \
+            "--info" | \
+            "--revoke" | \
+            "--crl" | \
+            "--export-config" | \
+            "--export-chain" | \
+            "--export-response" | \
+            "--export-zip" )
+                if [ "$param" == "CMD" ] ; then
+                    ret=0
+                    echo "$1"
+                fi
+                ;;
+
+            "--size" | \
+            "--cmd" | \
+            "--cn" | \
+            "--internalname" | \
+            "--servertc2" | \
+            "--file" | \
+            "--userid" | \
+            "--serial" | \
+            "--template" | \
+            "--url" )
+                if [ "$param" == "$1" ] && shift && [ -n "$1" ] ; then 
+                    ret=0
+                    echo "$1"
+                else
+                    shift
+                fi
+                ;;
+
+            "--help" | \
+            "--nopass")
+                if [ "$param" == "$1" ] ; then
+                    ret=0
+                fi
+                ;;
+
+            *)
+                [ -n "$1" ] || continue
+                echo "$1 - unknown parameter. Exit" >&2
+                exit 1
+                ;;
+            esac
+        done
+        ;;
+    esac
+
+    return "$ret"
+}
+
+
+# current_dir="$(dirname $(realpath -ms -- "$0"))"
+
+if [ $# -lt 1 ] || getparam "--help" "$@" ; then
+    helpexit
+fi
+
+if ! command -v base64 > /dev/null; then
+    echo "Install base64"
+    exit 1
+fi
+
+# if ! command -v openssl > /dev/null; then
+#   echo "Install openssl"
+#   exit 1
+# fi
+
+if ! command -v cryptsetup > /dev/null; then
+    echo "Install cryptsetup"
+    exit 1
+fi
+
+if ! command -v zip > /dev/null; then
+    echo "Install zip"
+    exit 1
+fi
+
+# if ! command -v openvpn > /dev/null; then
+#   echo "Install openvpn"
+#   exit 1
+# fi
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "Must be root to start"
+    exit 1
+fi
+
+
+if ! pki_container="$(getparam "CRYPT" "$@")" ; then
+    errorinfo "Cryptfile is not specified"
+    exit 1
+fi
+
+if ! command="$(getparam "CMD" "$@")" ; then
+    errorinfo "Not sure what you want me to do"
+    exit 1
+fi
+
+
+case "$command" in
+    "--init")
+        pki_container="$(realpath -ms -- "$pki_container")"
+        if [ -e "$pki_container" ]; then
+            errorinfo "File can not exist: $pki_container"
+            exit 1
+        fi
+
+        container_size_mib="$(getparam "--size" "$@")" || container_size_mib=12
+        t="$(echo "$container_size_mib" | sed 's/[^0-9]//g')"
+        if [ "$t" != "$container_size_mib" ] ; then
+            errorinfo "Size must be integer: $container_size_mib"
+            exit 1
+        fi
+
+        if [ "$container_size_mib" -lt 8 ] ; then
+            errorinfo "Size must be at least 8 MiB to fit journal: $container_size_mib"
+            exit 1
+        fi
+
+        # add crypto headers to the size
+        container_size_mib=$(( container_size_mib +16 ))
+
+        if crl_line="$(getparam "--url" "$@")" ; then
+            crl_line="crlDistributionPoints = URI:$crl_line"
+            crl_days="180"
+        else
+            crl_line=""
+            crl_days="36500"
+        fi
+
+        if ! dd if=/dev/urandom of="$pki_container" bs=1MiB count="$container_size_mib" &> /dev/null ; then
+            errorinfo "Cannot create file: $pki_container"
+            exit 1
+        fi
+
+        # if ! CTKEY_txt=$(openssl rand 32 | base64 -w0) ; then
+        if ! CTKEY_txt=$(openssl rand 64 | base64 -w0) ; then
+            rm -f "$pki_container"
+            errorinfo "Cannot create key"
+            exit 1
+        fi
+
+        if ! container_name=$(openssl rand -hex 8) ; then
+            rm -f "$pki_container"
+            errorinfo "Openssl rand error"
+            exit 1
+        fi
+
+        # if ! echo "$CTKEY_txt" | base64 -d | cryptsetup -q --cipher aes-cbc-essiv:sha256 --key-file - luksFormat "$pki_container" ; then
+        if ! echo "$CTKEY_txt" | base64 -d | cryptsetup -q luksFormat --type luks2 --cipher aes-xts-plain64 --key-size 512 --hash sha256 --pbkdf argon2id --key-file -  "$pki_container" ; then
+            rm -f "$pki_container"
+            errorinfo "Cannot format new container: $pki_container"
+            exit 1
+        fi
+
+        # if ! echo "$CTKEY_txt" | base64 -d | cryptsetup open --type luks --key-file - "$pki_container" "$container_name" ; then
+        if ! echo "$CTKEY_txt" | base64 -d | cryptsetup open --type luks2 --key-file - "$pki_container" "$container_name" ; then
+            rm -f "$pki_container"
+            errorinfo "Cannot open new container: $pki_container"
+            exit 1
+        fi
+
+        if ! mkfs.ext4 -q -m0 "/dev/mapper/$container_name" ; then
+            cryptsetup close "$container_name"
+            rm -f "$pki_container"
+            errorinfo "Cannot format FS in the container: $pki_container"
+            exit 1
+        fi
+        sync "/dev/mapper/$container_name" || sleep 5
+
+        if \
+            ! crypto_dir=$(mktemp -d /tmp/cptXXXXXX) || \
+            ! chmod 700 "$crypto_dir"
+        then
+            cryptsetup close "$container_name"
+            rm -f "$pki_container"
+            errorinfo "Cannot create temp mountpoint: $crypto_dir"
+            exit 1
+        fi
+
+        if ! mount -o sync "/dev/mapper/$container_name" "$crypto_dir" ; then
+            rm -rf "$crypto_dir"
+            cryptsetup close "$container_name"
+            rm -f "$pki_container"
+            errorinfo "Cannot mount container $pki_container to $crypto_dir"
+            exit 1
+        fi
+
+        ret=0
+        chmod 700 "$crypto_dir" && \
+        cp -a /usr/share/easy-rsa "$crypto_dir" && \
+        cp "$crypto_dir/easy-rsa/vars.example" "$crypto_dir/easy-rsa/vars" && \
+        echo "$crl_line" >> "$crypto_dir/easy-rsa/x509-types/COMMON" && \
+        mkdir -p "$crypto_dir/templates" && \
+        mkdir -p "$crypto_dir/tls-crypt-v2" && \
+        chmod 700 "$crypto_dir/tls-crypt-v2" && \
+        cat << VARS >> "$crypto_dir/easy-rsa/vars" || ret=1
+set_var EASYRSA_BATCH       Yes
+set_var EASYRSA_DIGEST      "sha512"
+set_var EASYRSA_CRL_DAYS    $crl_days
+set_var EASYRSA_CERT_EXPIRE 3650
+set_var EASYRSA_DN          "org"
+set_var EASYRSA_REQ_COUNTRY ""
+set_var EASYRSA_REQ_PROVINCE ""
+set_var EASYRSA_REQ_CITY    ""
+set_var EASYRSA_REQ_ORG     ""
+set_var EASYRSA_REQ_EMAIL   ""
+set_var EASYRSA_REQ_OU      ""
+VARS
+# set_var EASYRSA_ALGO        ec
+
+        [ "$ret" -eq 0 ] || \
+        errorinfo "RW error inside the container: $pki_container"
+
+        [ "$ret" -ne 0 ] || \
+        if \
+            ! exec_inside "$crypto_dir" "easy-rsa/easyrsa --pki-dir=\"$crypto_dir/pki\" init-pki" >&2
+        then
+            ret=1
+            errorinfo "Easyrsa cannot init in container: $pki_container"
+        fi
+
+        sync "/dev/mapper/$container_name" || sleep 20
+        umount -l "/dev/mapper/$container_name"
+        rm -rf "$crypto_dir"
+        cryptsetup close "$container_name"
+
+        if [ "$ret" -eq 0 ] ; then
+            echo "$CTKEY_txt"
+        else
+            rm -f "$pki_container"
+        fi
+        exit "$ret"
+        ;;
+
+    "--open")
+        close_container "$pki_container" || exit 1
+        crypto_dir=$(open_container "$pki_container" "$CTKEY") || exit 1
+        echo "$crypto_dir"
+        exit 0
+        ;;
+
+    "--close")
+        close_container "$pki_container" || exit 1
+        exit 0
+        ;;
+
+    "--loadreq")
+        if ! load_file="$(getparam "--file" "$@")" ; then
+            errorinfo "No file to load"
+            exit 1
+        fi
+
+        load_file="$(realpath -ms -- "$load_file")"
+        if [ ! -f "$load_file" ]; then
+            errorinfo "File does not exists: $load_file"
+            exit 1
+        fi
+
+        if ! internalname="$(getparam "--internalname" "$@")" ; then
+            internalname="$(basename "$load_file" | sed 's/\.[^\.]*$//')"
+            if [ -z "$internalname" ] || [ "$internalname" == "ca" ]; then
+                errorinfo "Inappropriate internalname"
+                exit 1
+            fi
+        fi
+
+        close_container "$pki_container" || exit 1
+        crypto_dir=$(open_container "$pki_container" "$CTKEY") || exit 1
+
+        ret=0
+        if \
+            [ -f "$crypto_dir/pki/private/${internalname}.key" ] || \
+            [ -f "$crypto_dir/pki/issued/${internalname}.crt" ]
+        then
+            ret=1
+            errorinfo "Internalname is in use: $internalname"
+        fi
+
+        [ "$ret" -ne 0 ] || \
+        if \
+            ! cp -f "$load_file" "$crypto_dir/pki/reqs/${internalname}.req"
+        then
+            ret=1
+            close_container "$pki_container" || ret=1
+        fi
+
+        exit "$ret"
+        ;;
+
+    "--newtc2")
+        if \
+            ! internalname="$(getparam "--internalname" "$@")" || \
+            [ -z "$internalname" ]
+        then
+            errorinfo "Incorrect internalname. Can not be empty."
+            exit 1
+        fi
+
+        close_container "$pki_container" || exit 1
+        crypto_dir=$(open_container "$pki_container" "$CTKEY") || exit 1
+
+        serverkey="$(getparam "--servertc2" "$@")"
+        key_file="$crypto_dir/tls-crypt-v2/"
+        server_key_file=""
+        if [ -n "$serverkey" ] ; then
+            key_file="${key_file}${serverkey}___"
+            server_key_file="$crypto_dir/tls-crypt-v2/${serverkey}.tc2"
+        fi
+        key_file="${key_file}${internalname}.tc2"
+
+        ret=0
+        if [ -f "$key_file" ]; then
+            errorinfo "This key is already exist: $key_file"
+            ret=1
+        fi
+
+        [ "$ret" -ne 0 ] || \
+        if \
+            [ -n "$server_key_file" ] && \
+            [ ! -f "$server_key_file" ]
+        then
+            errorinfo "Server key does not exist: $server_key_file"
+            ret=1
+        fi
+
+        [ "$ret" -ne 0 ] || \
+        if [ -z "$server_key_file" ] ; then
+            openvpn --genkey tls-crypt-v2-server "$key_file" || ret=1
+        else
+            openvpn --genkey tls-crypt-v2-client "$key_file" --tls-crypt-v2 "$server_key_file" || ret=1
+        fi
+
+        close_container "$pki_container" || ret=1
+        exit "$ret"
+        ;;
+
+    "--rmtc2")
+        if \
+            ! internalname="$(getparam "--internalname" "$@")" || \
+            [ -z "$internalname" ]
+        then
+            errorinfo "Incorrect internalname. Can not be empty."
+            exit 1
+        fi
+
+        close_container "$pki_container" || exit 1
+        crypto_dir=$(open_container "$pki_container" "$CTKEY") || exit 1
+
+        serverkey="$(getparam "--servertc2" "$@")"
+        key_file="$crypto_dir/tls-crypt-v2/"
+        server_key_file=""
+        if [ -n "$serverkey" ] ; then
+            key_file="${key_file}${serverkey}___"
+            server_key_file="$crypto_dir/tls-crypt-v2/${serverkey}.tc2"
+        fi
+        key_file="${key_file}${internalname}.tc2"
+
+        ret=0
+        if \
+            [ ! -f  "$key_file" ] || \
+            ! rm -f "$key_file"
+        then
+            ret=1
+        fi
+
+        close_container "$pki_container" || ret=1
+        exit "$ret"
+        ;;
+
+    "--newreq")
+        if \
+            ! internalname="$(getparam "--internalname" "$@")" || \
+            [ "$internalname" == "ca" ]
+        then
+            errorinfo "Incorrect internalname. Can not be empty or \"ca\""
+            exit 1
+        fi
+
+        cn_name="$(getparam "--cn" "$@")" || cn_name="$internalname"
+
+        nopass="nopass"
+        getparam "--nopass" "$@" || nopass=""
+
+        close_container "$pki_container" || exit 1
+        if ! crypto_dir=$(open_container "$pki_container" "$CTKEY"); then
+            errorinfo "Can not open container"
+            exit 1
+        fi
+
+        ret=0
+        if \
+            [ -f "$crypto_dir/pki/private/${internalname}.key" ] || \
+            [ -f "$crypto_dir/pki/issued/${internalname}.crt" ]
+        then
+            ret=1
+            errorinfo "internalname is in use: $internalname"
+        fi
+
+        if [ "$ret" -eq 0 ]; then
+            rm -f "$crypto_dir/pki/reqs/${internalname}.req"
+            exec_inside "$crypto_dir" "easy-rsa/easyrsa --req-cn=\"$cn_name\" gen-req \"$internalname\" $nopass" || ret=1
+        fi
+        close_container "$pki_container" || ret=1
+
+        exit "$ret"
+        ;;
+
+    "--signserver")
+        if \
+            ! internalname="$(getparam "--internalname" "$@")" || \
+            [ "$internalname" == "ca" ]
+        then
+            errorinfo 'Incorrect internalname. Can not be empty or "ca"'
+            exit 1
+        fi
+
+        userid="$(getparam "--userid" "$@")" || userid="$internalname"
+        close_container "$pki_container" || exit 1
+        crypto_dir=$(open_container "$pki_container" "$CTKEY") || exit 1
+
+        ret=0
+        if [ ! -f "$crypto_dir/pki/reqs/${internalname}.req" ] ; then
+            ret=1
+            errorinfo "No such request: ${internalname}.req"
+        fi
+
+        [ "$ret" -ne 0 ] || \
+        if [ -f "$crypto_dir/pki/issued/${internalname}.crt" ] ; then
+            ret=1
+            errorinfo "Cert with this internalname have already been issued: ${internalname}"
+        fi
+
+        if [ "$ret" -eq 0 ]; then
+            # parse subject, trim
+            dnsname=$(openssl req -in "$crypto_dir/pki/reqs/${internalname}.req" -noout -subject | sed 's/.*CN[ \t]*=[ \t]*\([^,]\+\).*/\1/' | sed 's/^[ \t]*//;s/[ \t]*$//' ) #'
+            if [ -z "$dnsname" ]; then
+                ret=1
+                errorinfo "Cannot parse CN from request"
+            fi
+        fi
+
+        if [ "$ret" -eq 0 ]; then
+            exec_inside "$crypto_dir" "easy-rsa/easyrsa --subject-alt-name='DNS:${dnsname},email:$userid' sign-req server $internalname" || ret=1
+        fi
+
+        close_container "$pki_container" || ret=1
+        exit "$ret"
+    ;;
+
+    "--signclient")
+        if \
+            ! internalname="$(getparam "--internalname" "$@")" || \
+            [ "$internalname" == "ca" ]
+        then
+            errorinfo "Incorrect internalname. Can not be empty or \"ca\""
+            exit 1
+        fi
+
+        userid="$(getparam "--userid" "$@")" || userid="$internalname"
+        close_container "$pki_container" || exit 1
+        crypto_dir=$(open_container "$pki_container" "$CTKEY") || exit 1
+
+        ret=0
+        if [ ! -f "$crypto_dir/pki/reqs/${internalname}.req" ] ; then
+            ret=1
+            errorinfo "No such a request: ${internalname}.req"
+        fi
+
+        [ "$ret" -ne 0 ] || \
+        if [ -f "$crypto_dir/pki/issued/${internalname}.crt" ] ; then
+            ret=1
+            errorinfo "Cert with this internalname have been already issued: ${internalname}"
+        fi
+
+        if [ "$ret" -eq 0 ]; then
+            # parse subject, trim
+            dnsname=$(openssl req -in "$crypto_dir/pki/reqs/${internalname}.req" -noout -subject | sed 's/.*CN[ \t]*=[ \t]*\([^,]\+\).*/\1/' | sed 's/^[ \t]*//;s/[ \t]*$//' ) #'
+            if [ -z "$dnsname" ]; then
+                ret=1
+                errorinfo "Cannot parse CN from request"
+            fi
+        fi
+
+        if [ "$ret" -eq 0 ]; then
+            exec_inside "$crypto_dir" "easy-rsa/easyrsa --subject-alt-name='DNS:${dnsname},email:$userid' sign-req client $internalname" || ret=1
+        fi
+
+        close_container "$pki_container" || ret=1
+        exit "$ret"
+    ;;
+
+    "--exec")
+        if ! cmd="$(getparam "--cmd" "$@")" ; then
+            errorinfo "Command is not specified"
+            exit 1
+        fi
+
+        close_container "$pki_container" || exit 1
+        crypto_dir=$(open_container "$pki_container" "$CTKEY") || exit 1
+
+        ret=0
+        exec_inside "$crypto_dir" "$cmd" || ret=1
+        close_container "$pki_container" || exit 1
+
+        exit "$ret"
+    ;;
+
+    "--info")
+        internalname="$(getparam "--internalname" "$@")" || internalname=""
+        serial="$(getparam "--serial" "$@")" || serial=""
+        if \
+            { [ -n "$internalname" ] && [ -n "$serial" ]; } || \
+            { [ -z "$internalname" ] && [ -z "$serial" ]; }
+        then
+            errorinfo "Only one of internalname or serial must be specified"
+            exit 1
+        fi
+
+        close_container "$pki_container" || exit 1
+        crypto_dir=$(open_container "$pki_container" "$CTKEY") || exit 1
+
+        ret=0
+        cert_file=""
+        if [ -n "$serial" ] && [ -f "$crypto_dir/pki/certs_by_serial/${serial^^}.pem" ] ; then
+            cert_file="$crypto_dir/pki/certs_by_serial/${serial^^}.pem"
+            echo "ACTIVE"
+        elif [ -n "$serial" ] && [ -f "$crypto_dir/pki/revoked/certs_by_serial/${serial^^}.crt" ] ; then
+            cert_file="$crypto_dir/pki/revoked/certs_by_serial/${serial^^}.crt"
+            echo "REVOKED"
+        elif [ -n "$internalname" ] && [ -f "$crypto_dir/pki/issued/${internalname}.crt" ] ; then
+            cert_file="$crypto_dir/pki/issued/${internalname}.crt"
+            echo "ACTIVE"
+        else
+            echo "NOTFOUND"
+        fi
+
+        if [ -n "$cert_file" ] && ! openssl x509 -in "$cert_file" -noout -text ; then
+            ret=1
+        fi
+        close_container "$pki_container" || ret=1
+
+        exit "$ret"
+    ;;
+
+    "--revoke")
+        internalname="$(getparam "--internalname" "$@")" || internalname=""
+        serial="$(getparam "--serial" "$@")" || serial=""
+        if \
+            { [ -n "$internalname" ] && [ -n "$serial" ]; } || \
+            { [ -z "$internalname" ] && [ -z "$serial" ]; }
+        then
+            errorinfo "Only one of internalname or serial must be specified"
+            exit 1
+        fi
+
+        if ! crl_file="$(getparam "--file" "$@")" ; then
+            errorinfo "Where to export the new CRL?"
+            exit 1
+        fi
+
+        crl_file="$(realpath -ms -- "$crl_file")"
+        if \
+            ! mkdir -p "$(dirname "$crl_file")" || \
+            ! touch "$crl_file" || \
+            [ ! -w "$crl_file" ] || \
+            [ ! -f "$crl_file" ]
+        then
+            errorinfo "Cannot write CRL in file: $crl_file"
+            exit 1
+        fi
+
+        close_container "$pki_container" || exit 1
+        crypto_dir=$(open_container "$pki_container" "$CTKEY") || exit 1
+
+        ret=1
+        if \
+            [ -n "$internalname" ] && \
+            [ -f "$crypto_dir/pki/issued/${internalname}.crt" ]
+        then
+            ret=0
+        elif [ -n "$serial" ] ; then
+
+            internalname=""
+            while read -r fname; do
+                [ -n "$fname" ] || continue
+                sn=$(openssl x509 -in "$fname" -noout -serial | cut -d"=" -f2)
+                [ "${serial^^}" != "${sn^^}" ] || internalname=$(basename "$fname"|sed 's/\.[^\.]*$//')
+            done <<< "$(find "$crypto_dir/pki/issued/" -type f -name '*.crt')"
+
+            if [ -n "$internalname" ]; then
+                ret=0
+            elif [ -z "$internalname" ] && [ -f "$crypto_dir/pki/certs_by_serial/${serial^^}.pem" ] ; then
+                echo "Trying to revoke a cert without crt file in issued/ but with pem file in serials."
+                echo "Kinda weired case, pki might be corrupted, but priority is to revoke."
+                echo "There still might be a key file left."
+
+                tempfile="$(mktemp "$crypto_dir/pki/issued/tmpXXXXXXXX.crt")" && \
+                cp -f "$crypto_dir/pki/certs_by_serial/${serial^^}.pem" "$tempfile" && \
+                internalname="$(basename "$tempfile"|sed 's/\.[^\.]*$//')" && \
+                ret=0
+            fi
+        fi
+
+        if [ "$ret" -ne 0 ] ; then
+            errorinfo "Cert not found."
+        else
+            exec_inside "$crypto_dir" "easy-rsa/easyrsa revoke $internalname" || ret=1
+        fi
+
+        if \
+            ! exec_inside "$crypto_dir" "easy-rsa/easyrsa gen-crl" || \
+            ! cp -f "$crypto_dir/pki/crl.pem" "$crl_file"
+        then
+            ret=1
+        fi
+        close_container "$pki_container" || ret=1
+
+        exit "$ret"
+    ;;
+
+    "--crl")
+        close_container "$pki_container" || exit 1
+        crypto_dir=$(open_container "$pki_container" "$CTKEY") || exit 1
+
+        if ! exec_inside "$crypto_dir" "easy-rsa/easyrsa gen-crl" ; then
+            errorinfo "Cannot generate a new CRL"
+            exit 1
+        fi
+
+        crl_file="$(getparam "--file" "$@")"
+        [ -z "$crl_file" ] || \
+        crl_file="$(realpath -ms -- "$crl_file")"
+
+        [ -z "$crl_file" ] || \
+        if \
+            ! mkdir -p "$(dirname "$crl_file")" || \
+            ! touch "$crl_file" || \
+            [ ! -w "$crl_file" ] || \
+            [ ! -f "$crl_file" ]
+        then
+            errorinfo "Bad destination for CRL: $crl_file"
+            exit 1
+        fi
+
+        ret=0
+        [ -z "$crl_file" ] || \
+        if \
+            ! cp -f "$crypto_dir/pki/crl.pem" "$crl_file"
+        then
+            ret=1
+        fi
+        close_container "$pki_container" || ret=1
+
+        exit "$ret"
+    ;;
+
+    "--loadtemplate")
+        if ! load_file="$(getparam "--file" "$@")" ; then
+            errorinfo "No file to load"
+            exit 1
+        fi
+
+        load_file="$(realpath -ms -- "$load_file")"
+        if [ ! -f "$load_file" ]; then
+            errorinfo "File does not exists: $load_file"
+            return 1
+        fi
+
+        close_container "$pki_container" || exit 1
+        crypto_dir=$(open_container "$pki_container" "$CTKEY") || exit 1
+
+        ret=0
+        cp -f "$load_file" "$crypto_dir/templates/" || ret=1
+        close_container "$pki_container" || ret=1
+
+        exit "$ret"
+        ;;
+
+    "--export-chain")
+        if \
+            ! internalname="$(getparam "--internalname" "$@")" || \
+            [ "$internalname" == "ca" ]
+        then
+            errorinfo 'Incorrect internalname. Can not be empty or "ca"'
+            exit 1
+        fi
+
+        if ! export_file="$(getparam "--file" "$@")" ; then
+            errorinfo "Where to export?"
+            exit 1
+        fi
+        export_file="$(realpath -ms -- "$export_file")"
+
+        if \
+            ! mkdir -p "$(dirname "$export_file")" || \
+            ! touch "$export_file" || \
+            [ ! -w "$export_file" ] || \
+            [ ! -f "$export_file" ]
+        then
+            errorinfo "Cannot write in file: $export_file"
+            exit 1
+        fi
+
+        close_container "$pki_container" || exit 1
+        crypto_dir="$(open_container "$pki_container" "$CTKEY")" || exit 1
+
+        ret=0
+        exec_inside "$crypto_dir" "easy-rsa/easyrsa export-p12 $internalname" || ret=1
+
+        if \
+            [ "$ret" -eq 0 ] && \
+            ! mv -f "$crypto_dir/pki/private/${internalname}.p12" "$export_file"
+        then
+            ret=1
+        fi
+        close_container "$pki_container" || ret=1
+
+        exit "$ret"
+    ;;
+
+    "--export-response")
+        if \
+            ! internalname="$(getparam "--internalname" "$@")" || \
+            [ "$internalname" == "ca" ]
+        then
+            errorinfo 'Incorrect internalname. Can not be empty or "ca"'
+            exit 1
+        fi
+
+        if ! export_file="$(getparam "--file" "$@")" ; then
+            errorinfo "Where to export?"
+            exit 1
+        fi
+        export_file="$(realpath -ms -- "$export_file")"
+
+        if \
+            ! mkdir -p "$(dirname "$export_file")" || \
+            ! touch "$export_file" || \
+            [ ! -w "$export_file" ] || \
+            [ ! -f "$export_file" ]
+        then
+            errorinfo "Cannot write in file: $export_file"
+            exit 1
+        fi
+
+        close_container "$pki_container" || exit 1
+        crypto_dir="$(open_container "$pki_container" "$CTKEY")" || exit 1
+
+        ret=0
+        exec_inside "$crypto_dir" "easy-rsa/easyrsa export-p7 $internalname" || ret=1
+        if \
+            [ "$ret" -eq 0 ] && \
+            ! mv -f "$crypto_dir/pki/issued/${internalname}.p7b" "$export_file"
+        then
+            ret=1
+        fi
+        close_container "$pki_container" || ret=1
+
+        exit "$ret"
+    ;;
+
+    "--export-zip")
+        if ! internalname="$(getparam "--internalname" "$@")" || [ "$internalname" == "ca" ] ; then
+            errorinfo 'Incorrect internalname. Can not be empty or "ca"'
+            exit 1
+        fi
+
+        if ! export_file="$(getparam "--file" "$@")" ; then
+            errorinfo "Where to export?"
+            exit 1
+        fi
+        export_file="$(realpath -ms -- "$export_file")"
+        mkdir -p "$(dirname "$export_file")" || exit 1
+
+        close_container "$pki_container" || exit 1
+        crypto_dir="$(open_container "$pki_container" "$CTKEY")" || exit 1
+
+        serverkey="$(getparam "--servertc2" "$@")"
+        key_file="$crypto_dir/tls-crypt-v2/"
+        server_key_file=""
+        if [ -n "$serverkey" ] ; then
+            key_file="${key_file}${serverkey}___"
+            server_key_file="$crypto_dir/tls-crypt-v2/${serverkey}.tc2"
+        fi
+        key_file="${key_file}${internalname}.tc2"
+        [ -f "$key_file" ] || key_file=""
+
+        crl_file="$crypto_dir/pki/crl.pem"
+        [ -f "$crl_file" ] || crl_file=""
+
+        ret=0
+        if [ -f "$export_file" ] ; then
+            rm -f "$export_file" || ret=1
+        fi
+
+        zip -j "$export_file" "$crl_file" "$crypto_dir/pki/ca.crt" "$key_file" "$crypto_dir/pki/issued/${internalname}.crt" "$crypto_dir/pki/private/${internalname}.key" || ret=1
+        close_container "$pki_container" || ret=1
+
+        exit "$ret"
+    ;;
+
+    "--export-config")
+        if \
+            ! internalname="$(getparam "--internalname" "$@")" || \
+            [ "$internalname" == "ca" ]
+        then
+            errorinfo 'Incorrect internalname. Can not be empty or "ca"'
+            exit 1
+        fi
+
+        if ! export_file="$(getparam "--file" "$@")" ; then
+            errorinfo "Where to export?"
+            exit 1
+        fi
+        export_file="$(realpath -ms -- "$export_file")"
+        if \
+            ! mkdir -p "$(dirname "$export_file")" || \
+            ! touch "$export_file" || \
+            [ ! -w "$export_file" ] || \
+            [ ! -f "$export_file" ]
+        then
+            errorinfo "Cannot write in file: $export_file"
+            exit 1
+        fi
+
+        if ! template="$(getparam "--template" "$@")" ; then
+            errorinfo "Need a template"
+            exit 1
+        fi
+
+        close_container "$pki_container" || exit 1
+        crypto_dir="$(open_container "$pki_container" "$CTKEY")" || exit 1
+
+        serverkey="$(getparam "--servertc2" "$@")"
+        key_file="$crypto_dir/tls-crypt-v2/"
+        server_key_file=""
+        if [ -n "$serverkey" ] ; then
+            key_file="${key_file}${serverkey}___"
+            server_key_file="$crypto_dir/tls-crypt-v2/${serverkey}.tc2"
+        fi
+        key_file="${key_file}${internalname}.tc2"
+
+        ret=0
+        if \
+            [ "$ret" -eq 0 ] && \
+            [ ! -f "$crypto_dir/pki/issued/${internalname}.crt" ]
+        then
+            ret=1
+            errorinfo "No cert with this internalname: $internalname"
+        fi
+
+        if \
+            [ "$ret" -eq 0 ] && \
+            [ ! -f "$crypto_dir/templates/$template" ]
+        then
+            ret=1
+            errorinfo "No such template: $template"
+        fi
+
+        if [ "$ret" -eq 0 ]; then
+            (
+                SUBSTKEYNAME="$internalname"
+                SUBSTCA="$(echo -e "<ca>\n$(cat "$crypto_dir/pki/ca.crt")\n</ca>")"
+                SUBSTCERT="$(echo -e "<cert>\n$(cat "$crypto_dir/pki/issued/${internalname}.crt")\n</cert>")"
+                if [ -f "$key_file" ]; then
+                    SUBSTTC2="$(echo -e "<tls-crypt-v2>\n$(cat "$key_file")\n</tls-crypt-v2>")"
+                    export SUBSTTC2
+                fi
+                fingerprint="$(openssl x509 -in "$crypto_dir/pki/issued/${internalname}.crt" -fingerprint -noout | sed 's/://g' | cut -d"=" -f2)"
+                # trunk-ignore(shellcheck/SC2089)
+                SUBSTCERTAPI="cryptoapicert \"THUMB:${fingerprint}\""
+                export SUBSTKEYNAME
+                export SUBSTCA
+                export SUBSTCERT
+                # trunk-ignore(shellcheck/SC2090)
+                export SUBSTCERTAPI
+                if [ -f "$crypto_dir/pki/private/${internalname}.key" ] ; then
+                    SUBSTKEY="$(echo -e "<key>\n$(cat "$crypto_dir/pki/private/${internalname}.key")\n</key>")"
+                    export SUBSTKEY
+                fi
+                envsubst < "$crypto_dir/templates/$template" > "$export_file"
+            ) || ret=1
+        fi
+        close_container "$pki_container" || ret=1
+
+        exit "$ret"
+    ;;
+
+    *)
+        errorinfo "No command given"
+        exit 1
+        ;;
+esac

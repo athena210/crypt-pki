@@ -1,0 +1,4 @@
+/templates.var
+!/templates.var.example
+/tpl/*
+!/tpl/*/

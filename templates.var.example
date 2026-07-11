@@ -1,0 +1,8 @@
+#/bin/sh
+
+export PREPARE_TEMPLATE_SERVER1=vpn.example.com
+export PREPARE_TEMPLATE_SERVER2=vpn.example.com
+export PREPARE_TEMPLATE_PORT1=1194
+export PREPARE_TEMPLATE_PORT2=1195
+export PREPARE_TEMPLATE_ROLES=guest
+export PREPARE_TEMPLATE_PASSWORD=password

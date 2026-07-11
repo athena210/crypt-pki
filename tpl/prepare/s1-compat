@@ -1,0 +1,36 @@
+# Compat server template
+
+verb                    1
+persist-tun
+dev-type                tun
+dev                     vpn2
+proto                   tcp4-server
+port                    $PREPARE_TEMPLATE_PORT2
+data-ciphers-fallback   AES-256-CBC
+auth                    SHA1
+reneg-bytes             16000000
+data-ciphers            AES-256-GCM:AES-256-CBC
+tls-version-min         1.2
+dh                      none
+remote-cert-tls         client
+server                  {{ OVPN_COMPAT_NET4 | get_network }} {{ OVPN_COMPAT_NET4 | get_netmask }}
+
+{% if OVPN_COMPAT_NET6 is defined %}
+server-ipv6             {{ OVPN_COMPAT_NET6 }}
+{% endif %}
+
+topology                subnet
+keepalive               10  23
+
+setenv                  instance    compat
+script-security         2
+auth-user-pass-verify   "/usr/bin/env python3 /etc/vpn/helper.py" via-file
+client-connect          "/usr/bin/env python3 /etc/vpn/helper.py"
+learn-address           "/usr/bin/env python3 /etc/vpn/helper.py"
+
+ca                      /pki/ca.crt
+crl-verify              /pki/crl.pem
+cert                    /pki/server.crt
+key                     /pki/server.key
+
+management              127.0.0.1 5556
